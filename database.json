@@ -1,0 +1,36 @@
+{
+  "users": [
+    {
+      "username": "Asif Mehmood",
+      "passwordHash": "f25c9296560bc5fe1165dd0918298e716b3fa518ceb709fa72e51332dad289f5",
+      "shopName": "Ramzan Autos",
+      "shopType": "rickshaw",
+      "active": true
+    }
+  ],
+  "products": {
+    "Asif Mehmood": []
+  },
+  "invoices": {
+    "Asif Mehmood": []
+  },
+  "profiles": {
+    "Asif Mehmood": {
+      "shopName": "Ramzan Autos",
+      "shopType": "rickshaw",
+      "address": "",
+      "phone": "03337347206"
+    }
+  },
+  "softwareSales": [
+    {
+      "id": "c593b218-2172-4115-a4d7-588e5610008c",
+      "clientUsername": "Anas",
+      "clientShopName": "Electronics",
+      "salePrice": 15000,
+      "costPrice": 0,
+      "profit": 15000,
+      "date": "2026-06-30"
+    }
+  ]
+}
