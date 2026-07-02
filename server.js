@@ -1,43 +1,53 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
 const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const DB_FILE = path.join(__dirname, 'database.json');
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/shopsync";
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Serve static files from the root directory (so crm.html and client assets are accessible)
+// Serve frontend if running locally
 app.use(express.static(path.join(__dirname, '../')));
 
-// Helper to load database
-function loadDb() {
-  if (!fs.existsSync(DB_FILE)) {
-    const initialDb = { users: [], products: {}, invoices: {}, profiles: {}, softwareSales: [] };
-    fs.writeFileSync(DB_FILE, JSON.stringify(initialDb, null, 2));
-    return initialDb;
-  }
-  try {
-    const data = fs.readFileSync(DB_FILE, 'utf8');
-    const parsed = JSON.parse(data);
-    if (!parsed.softwareSales) parsed.softwareSales = [];
-    return parsed;
-  } catch (err) {
-    console.error("Error reading database file, resetting:", err);
-    return { users: [], products: {}, invoices: {}, profiles: {}, softwareSales: [] };
-  }
-}
+// --- Mongoose Setup ---
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('✅ Connected to MongoDB Database'))
+  .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
-// Helper to save database
-function saveDb(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
+const UserSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  passwordHash: { type: String, required: true },
+  shopName: String,
+  shopType: String,
+  active: { type: Boolean, default: true }
+});
 
-// Helper to hash password
+const ClientDataSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  products: { type: Array, default: [] },
+  invoices: { type: Array, default: [] },
+  profile: { type: Object, default: {} }
+});
+
+const SoftwareSaleSchema = new mongoose.Schema({
+  id: String,
+  clientUsername: String,
+  clientShopName: String,
+  salePrice: Number,
+  costPrice: Number,
+  profit: Number,
+  date: String
+});
+
+const User = mongoose.model('User', UserSchema);
+const ClientData = mongoose.model('ClientData', ClientDataSchema);
+const SoftwareSale = mongoose.model('SoftwareSale', SoftwareSaleSchema);
+
 function hashPassword(password) {
   return crypto.createHash('sha256').update(password).digest('hex');
 }
@@ -45,349 +55,326 @@ function hashPassword(password) {
 // --- API ROUTES ---
 
 // 1. Signup Route
-app.post('/api/auth/signup', (req, res) => {
-  const { username, password, shopName, shopType, address, phone } = req.body;
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { username, password, shopName, shopType, address, phone } = req.body;
+    if (!username || !password || !shopName || !shopType) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
 
-  if (!username || !password || !shopName || !shopType) {
-    return res.status(400).json({ error: "Missing required fields" });
+    const userExists = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (userExists) return res.status(400).json({ error: "Username already taken" });
+
+    const newUser = new User({
+      username,
+      passwordHash: hashPassword(password),
+      shopName,
+      shopType
+    });
+    await newUser.save();
+
+    const newData = new ClientData({
+      username,
+      products: [],
+      invoices: [],
+      profile: { shopName, shopType, address: address || "", phone: phone || "" }
+    });
+    await newData.save();
+
+    res.status(201).json({ message: "User registered successfully", user: { username, shopName, shopType } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const db = loadDb();
-  const userExists = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-
-  if (userExists) {
-    return res.status(400).json({ error: "Username already taken" });
-  }
-
-  const passwordHash = hashPassword(password);
-  const newUser = { username, passwordHash, shopName, shopType };
-  db.users.push(newUser);
-
-  // Initialize data stores
-  db.products[username] = [];
-  db.invoices[username] = [];
-  db.profiles[username] = { shopName, shopType, address: address || "", phone: phone || "" };
-
-  saveDb(db);
-  res.status(201).json({ message: "User registered successfully", user: { username, shopName, shopType } });
 });
 
 // 2. Login Route
-app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body;
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Missing username or password" });
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Missing username or password" });
-  }
-
-  const db = loadDb();
-  const user = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-
-  if (!user || user.passwordHash !== hashPassword(password)) {
-    return res.status(401).json({ error: "Invalid username or password" });
-  }
-
-  if (user.active === false) {
-    return res.status(403).json({ error: "Your license is inactive. Please contact the administrator to activate it." });
-  }
-
-  const profile = db.profiles[username] || { shopName: user.shopName, shopType: user.shopType, address: "", phone: "" };
-  res.json({
-    message: "Login successful",
-    user: {
-      username: user.username,
-      shopName: profile.shopName,
-      shopType: profile.shopType,
-      address: profile.address,
-      phone: profile.phone
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (!user || user.passwordHash !== hashPassword(password)) {
+      return res.status(401).json({ error: "Invalid username or password" });
     }
-  });
+    if (user.active === false) {
+      return res.status(403).json({ error: "Your license is inactive. Please contact the administrator to activate it." });
+    }
+
+    const data = await ClientData.findOne({ username: user.username }) || {};
+    const profile = data.profile || { shopName: user.shopName, shopType: user.shopType, address: "", phone: "" };
+    
+    res.json({
+      message: "Login successful",
+      user: {
+        username: user.username,
+        shopName: profile.shopName || user.shopName,
+        shopType: profile.shopType || user.shopType,
+        address: profile.address,
+        phone: profile.phone
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// 3. Sync Push Route (Upload local changes to Cloud)
-app.post('/api/sync/push', (req, res) => {
-  const { username, products, invoices, profile } = req.body;
+// 3. Sync Push Route
+app.post('/api/sync/push', async (req, res) => {
+  try {
+    const { username, products, invoices, profile } = req.body;
+    if (!username) return res.status(400).json({ error: "Username is required" });
 
-  if (!username) {
-    return res.status(400).json({ error: "Username is required" });
-  }
-
-  const db = loadDb();
-  
-  // Merge or overwrite products
-  if (products) {
-    db.products[username] = products;
-  }
-  
-  // Merge or overwrite invoices
-  if (invoices) {
-    db.invoices[username] = invoices;
-  }
-
-  // Save profile settings
-  if (profile) {
-    db.profiles[username] = profile;
-    const userIndex = db.users.findIndex(u => u.username === username);
-    if (userIndex !== -1) {
-      db.users[userIndex].shopName = profile.shopName;
-      db.users[userIndex].shopType = profile.shopType;
+    let clientData = await ClientData.findOne({ username });
+    if (!clientData) {
+      clientData = new ClientData({ username, products: [], invoices: [], profile: {} });
     }
-  }
 
-  saveDb(db);
-  res.json({ message: "Sync push completed successfully" });
+    if (products) clientData.products = products;
+    if (invoices) clientData.invoices = invoices;
+    if (profile) {
+      clientData.profile = profile;
+      await User.updateOne({ username }, { $set: { shopName: profile.shopName, shopType: profile.shopType } });
+    }
+
+    await clientData.save();
+    res.json({ message: "Sync push completed successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// 4. Sync Pull Route (Download Cloud data to local app)
-app.get('/api/sync/pull', (req, res) => {
-  const { username } = req.query;
+// 4. Sync Pull Route
+app.get('/api/sync/pull', async (req, res) => {
+  try {
+    const { username } = req.query;
+    if (!username) return res.status(400).json({ error: "Username is required" });
 
-  if (!username) {
-    return res.status(400).json({ error: "Username is required" });
+    const data = await ClientData.findOne({ username });
+    if (!data) {
+      return res.json({ products: [], invoices: [], profile: { shopName: "My Shop", shopType: "general", address: "", phone: "" } });
+    }
+    res.json({ products: data.products, invoices: data.invoices, profile: data.profile });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const db = loadDb();
-  
-  res.json({
-    products: db.products[username] || [],
-    invoices: db.invoices[username] || [],
-    profile: db.profiles[username] || { shopName: "My Shop", shopType: "general", address: "", phone: "" }
-  });
 });
 
 // --- CRM API ROUTES ---
 
 // 1. Get System Stats
-app.get('/api/crm/stats', (req, res) => {
-  const db = loadDb();
-  const totalUsers = db.users.length;
-  let totalProducts = 0;
-  let totalInvoices = 0;
-  let totalRevenue = 0;
-  let totalProfit = 0;
-
-  db.users.forEach(u => {
-    const uProds = db.products[u.username] || [];
-    const uInvs = db.invoices[u.username] || [];
-    totalProducts += uProds.length;
-    totalInvoices += uInvs.length;
-
-    totalRevenue += uInvs.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
-    totalProfit += uInvs.reduce((sum, inv) => sum + (inv.profit || 0), 0);
-  });
-
-  // Software sales metrics (for the admin)
-  const totalSoftwareSalesRevenue = (db.softwareSales || []).reduce((sum, s) => sum + (s.salePrice || 0), 0);
-  const totalSoftwareSalesCost = (db.softwareSales || []).reduce((sum, s) => sum + (s.costPrice || 0), 0);
-  const totalSoftwareSalesProfit = (db.softwareSales || []).reduce((sum, s) => sum + (s.profit || 0), 0);
-
-  res.json({
-    totalUsers,
-    totalProducts,
-    totalInvoices,
-    totalRevenue,
-    totalProfit,
-    softwareSales: {
-      revenue: totalSoftwareSalesRevenue,
-      cost: totalSoftwareSalesCost,
-      profit: totalSoftwareSalesProfit
-    }
-  });
-});
-
-// 2. Get All Client Users (with counts and totals)
-app.get('/api/crm/users', (req, res) => {
-  const db = loadDb();
-  const usersList = db.users.map(u => {
-    const profile = db.profiles[u.username] || {};
-    const productCount = (db.products[u.username] || []).length;
-    const invoiceCount = (db.invoices[u.username] || []).length;
+app.get('/api/crm/stats', async (req, res) => {
+  try {
+    const usersCount = await User.countDocuments();
+    const allData = await ClientData.find({});
     
-    const userInvoices = db.invoices[u.username] || [];
-    const totalSales = userInvoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
-    const totalProfit = userInvoices.reduce((sum, inv) => sum + (inv.profit || 0), 0);
+    let totalProducts = 0, totalInvoices = 0, totalRevenue = 0, totalProfit = 0;
+    allData.forEach(d => {
+      totalProducts += (d.products || []).length;
+      totalInvoices += (d.invoices || []).length;
+      totalRevenue += (d.invoices || []).reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
+      totalProfit += (d.invoices || []).reduce((sum, inv) => sum + (inv.profit || 0), 0);
+    });
 
-    return {
-      username: u.username,
-      shopName: u.shopName || profile.shopName || "Unnamed Shop",
-      shopType: u.shopType || profile.shopType || "general",
-      address: profile.address || "",
-      phone: profile.phone || "",
-      active: u.active !== false, // default to active (true)
-      productCount,
-      invoiceCount,
-      totalSales,
-      totalProfit
-    };
-  });
-  res.json({ users: usersList });
-});
+    const sales = await SoftwareSale.find({});
+    const totalSoftwareSalesRevenue = sales.reduce((sum, s) => sum + (s.salePrice || 0), 0);
+    const totalSoftwareSalesCost = sales.reduce((sum, s) => sum + (s.costPrice || 0), 0);
+    const totalSoftwareSalesProfit = sales.reduce((sum, s) => sum + (s.profit || 0), 0);
 
-// 3. Create a Client User
-app.post('/api/crm/users', (req, res) => {
-  const { username, password, shopName, shopType, address, phone } = req.body;
-
-  if (!username || !password || !shopName || !shopType) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  const db = loadDb();
-  const userExists = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-
-  if (userExists) {
-    return res.status(400).json({ error: "Username already taken" });
-  }
-
-  const passwordHash = hashPassword(password);
-  const newUser = { username, passwordHash, shopName, shopType, active: true };
-  db.users.push(newUser);
-
-  // Initialize data stores
-  db.products[username] = [];
-  db.invoices[username] = [];
-  db.profiles[username] = { shopName, shopType, address: address || "", phone: phone || "" };
-
-  saveDb(db);
-  res.status(201).json({ message: "Client account created successfully" });
-});
-
-// 4. Update a Client User
-app.put('/api/crm/users/:username', (req, res) => {
-  const targetUsername = req.params.username;
-  const { password, shopName, shopType, address, phone } = req.body;
-
-  const db = loadDb();
-  const userIndex = db.users.findIndex(u => u.username.toLowerCase() === targetUsername.toLowerCase());
-
-  if (userIndex === -1) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  if (password && password.trim().length > 0) {
-    db.users[userIndex].passwordHash = hashPassword(password);
-  }
-  if (shopName) db.users[userIndex].shopName = shopName;
-  if (shopType) db.users[userIndex].shopType = shopType;
-
-  if (!db.profiles[targetUsername]) {
-    db.profiles[targetUsername] = {};
-  }
-  if (shopName) db.profiles[targetUsername].shopName = shopName;
-  if (shopType) db.profiles[targetUsername].shopType = shopType;
-  if (address !== undefined) db.profiles[targetUsername].address = address;
-  if (phone !== undefined) db.profiles[targetUsername].phone = phone;
-
-  saveDb(db);
-  res.json({ message: "Client account updated successfully" });
-});
-
-// 5. Delete a Client User and all associated data
-app.delete('/api/crm/users/:username', (req, res) => {
-  const targetUsername = req.params.username;
-  const db = loadDb();
-
-  const userIndex = db.users.findIndex(u => u.username.toLowerCase() === targetUsername.toLowerCase());
-  if (userIndex === -1) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  db.users.splice(userIndex, 1);
-  delete db.products[targetUsername];
-  delete db.invoices[targetUsername];
-  delete db.profiles[targetUsername];
-
-  saveDb(db);
-  res.json({ message: "Client account and all associated data deleted" });
-});
-
-// 6. Get Specific Client Database Info
-app.get('/api/crm/users/:username/data', (req, res) => {
-  const targetUsername = req.params.username;
-  const db = loadDb();
-
-  const userExists = db.users.find(u => u.username.toLowerCase() === targetUsername.toLowerCase());
-  if (!userExists) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  res.json({
-    products: db.products[targetUsername] || [],
-    invoices: db.invoices[targetUsername] || [],
-    profile: db.profiles[targetUsername] || {}
-  });
-});
-
-// 7. Toggle Client Active Status
-app.post('/api/crm/users/:username/toggle-active', (req, res) => {
-  const { username } = req.params;
-  const db = loadDb();
-  const user = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-  
-  if (!user) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  user.active = user.active !== false ? false : true;
-  saveDb(db);
-  res.json({ message: `Client is now ${user.active ? 'active' : 'inactive'}`, active: user.active });
-});
-
-// 8. Get Software Sales Records
-app.get('/api/crm/software-sales', (req, res) => {
-  const db = loadDb();
-  res.json({ sales: db.softwareSales || [] });
-});
-
-// 9. Log a Software Sale
-app.post('/api/crm/software-sales', (req, res) => {
-  const { clientUsername, clientShopName, salePrice, costPrice, date } = req.body;
-
-  if (!clientShopName || !salePrice) {
-    return res.status(400).json({ error: "Client Shop Name and Sale Price are required" });
-  }
-
-  const db = loadDb();
-  const newSale = {
-    id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
-    clientUsername: clientUsername || "",
-    clientShopName,
-    salePrice: parseFloat(salePrice),
-    costPrice: parseFloat(costPrice || 0),
-    profit: parseFloat(salePrice) - parseFloat(costPrice || 0),
-    date: date || new Date().toISOString().substring(0, 10)
-  };
-
-  db.softwareSales.push(newSale);
-  saveDb(db);
-  res.status(201).json({ message: "Software sale logged successfully", sale: newSale });
-});
-
-// 10. Delete a Software Sale Record
-app.delete('/api/crm/software-sales/:id', (req, res) => {
-  const { id } = req.params;
-  const db = loadDb();
-  
-  db.softwareSales = (db.softwareSales || []).filter(s => s.id !== id);
-  saveDb(db);
-  res.json({ message: "Software sale record deleted successfully" });
-});
-
-// 11. Backup Master Database File
-app.get('/api/crm/backup', (req, res) => {
-  if (fs.existsSync(DB_FILE)) {
-    res.download(DB_FILE, 'master_database.json');
-  } else {
-    res.status(404).json({ error: "Database file not found" });
+    res.json({
+      totalUsers: usersCount, totalProducts, totalInvoices, totalRevenue, totalProfit,
+      softwareSales: { revenue: totalSoftwareSalesRevenue, cost: totalSoftwareSalesCost, profit: totalSoftwareSalesProfit }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 12. Wipe and Reset Database
-app.post('/api/crm/reset', (req, res) => {
-  const resetDb = { users: [], products: {}, invoices: {}, profiles: {}, softwareSales: [] };
-  saveDb(resetDb);
-  res.json({ message: "Cloud database wiped and reset successfully" });
+// 2. Get All Client Users
+app.get('/api/crm/users', async (req, res) => {
+  try {
+    const users = await User.find({});
+    const allData = await ClientData.find({});
+    
+    const usersList = users.map(u => {
+      const data = allData.find(d => d.username === u.username) || { products: [], invoices: [], profile: {} };
+      const productCount = data.products.length;
+      const invoiceCount = data.invoices.length;
+      const totalSales = data.invoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
+      const totalProfit = data.invoices.reduce((sum, inv) => sum + (inv.profit || 0), 0);
+
+      return {
+        username: u.username,
+        shopName: u.shopName || data.profile.shopName || "Unnamed Shop",
+        shopType: u.shopType || data.profile.shopType || "general",
+        address: data.profile.address || "",
+        phone: data.profile.phone || "",
+        active: u.active !== false,
+        productCount, invoiceCount, totalSales, totalProfit
+      };
+    });
+    res.json({ users: usersList });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Create a Client User (CRM)
+app.post('/api/crm/users', async (req, res) => {
+  try {
+    const { username, password, shopName, shopType, address, phone } = req.body;
+    if (!username || !password || !shopName || !shopType) return res.status(400).json({ error: "Missing fields" });
+
+    const userExists = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (userExists) return res.status(400).json({ error: "Username already taken" });
+
+    await new User({ username, passwordHash: hashPassword(password), shopName, shopType, active: true }).save();
+    await new ClientData({ username, products: [], invoices: [], profile: { shopName, shopType, address, phone } }).save();
+    
+    res.status(201).json({ message: "Client account created successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Update Client User
+app.put('/api/crm/users/:username', async (req, res) => {
+  try {
+    const targetUsername = req.params.username;
+    const { password, shopName, shopType, address, phone } = req.body;
+
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (password && password.trim().length > 0) user.passwordHash = hashPassword(password);
+    if (shopName) user.shopName = shopName;
+    if (shopType) user.shopType = shopType;
+    await user.save();
+
+    let data = await ClientData.findOne({ username: user.username });
+    if (!data) data = new ClientData({ username: user.username, profile: {} });
+    
+    if (shopName) data.profile.shopName = shopName;
+    if (shopType) data.profile.shopType = shopType;
+    if (address !== undefined) data.profile.address = address;
+    if (phone !== undefined) data.profile.phone = phone;
+    
+    data.markModified('profile');
+    await data.save();
+
+    res.json({ message: "Client account updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Delete Client User
+app.delete('/api/crm/users/:username', async (req, res) => {
+  try {
+    const username = req.params.username;
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    await User.deleteOne({ username: user.username });
+    await ClientData.deleteOne({ username: user.username });
+    res.json({ message: "Client account and data deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Get Client Data
+app.get('/api/crm/users/:username/data', async (req, res) => {
+  try {
+    const username = req.params.username;
+    const data = await ClientData.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (!data) return res.status(404).json({ error: "Data not found" });
+    res.json({ products: data.products, invoices: data.invoices, profile: data.profile });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Toggle Active Status
+app.post('/api/crm/users/:username/toggle-active', async (req, res) => {
+  try {
+    const username = req.params.username;
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    user.active = user.active !== false ? false : true;
+    await user.save();
+    res.json({ message: `Client is now ${user.active ? 'active' : 'inactive'}`, active: user.active });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Software Sales Routes
+app.get('/api/crm/software-sales', async (req, res) => {
+  try {
+    const sales = await SoftwareSale.find({});
+    res.json({ sales });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/crm/software-sales', async (req, res) => {
+  try {
+    const { clientUsername, clientShopName, salePrice, costPrice, date } = req.body;
+    if (!clientShopName || !salePrice) return res.status(400).json({ error: "Missing fields" });
+
+    const newSale = new SoftwareSale({
+      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
+      clientUsername: clientUsername || "",
+      clientShopName,
+      salePrice: parseFloat(salePrice),
+      costPrice: parseFloat(costPrice || 0),
+      profit: parseFloat(salePrice) - parseFloat(costPrice || 0),
+      date: date || new Date().toISOString().substring(0, 10)
+    });
+
+    await newSale.save();
+    res.status(201).json({ message: "Sale logged", sale: newSale });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/crm/software-sales/:id', async (req, res) => {
+  try {
+    await SoftwareSale.deleteOne({ id: req.params.id });
+    res.json({ message: "Sale deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backup
+app.get('/api/crm/backup', async (req, res) => {
+  try {
+    const users = await User.find({});
+    const clientData = await ClientData.find({});
+    const softwareSales = await SoftwareSale.find({});
+    res.json({ users, clientData, softwareSales });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset
+app.post('/api/crm/reset', async (req, res) => {
+  try {
+    await User.deleteMany({});
+    await ClientData.deleteMany({});
+    await SoftwareSale.deleteMany({});
+    res.json({ message: "Cloud database wiped and reset successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`ShopSync cloud server running on http://localhost:${PORT}`);
+  console.log(`ShopSync Mongoose server running on http://localhost:${PORT}`);
 });
