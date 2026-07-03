@@ -33,6 +33,7 @@ const ClientDataSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   products: { type: Array, default: [] },
   invoices: { type: Array, default: [] },
+  vendors: { type: Array, default: [] },
   profile: { type: Object, default: {} }
 });
 
@@ -133,16 +134,17 @@ app.post('/api/auth/login', async (req, res) => {
 // 3. Sync Push Route
 app.post('/api/sync/push', async (req, res) => {
   try {
-    const { username, products, invoices, profile } = req.body;
+    const { username, products, invoices, vendors, profile } = req.body;
     if (!username) return res.status(400).json({ error: "Username is required" });
 
     let clientData = await ClientData.findOne({ username });
     if (!clientData) {
-      clientData = new ClientData({ username, products: [], invoices: [], profile: {} });
+      clientData = new ClientData({ username, products: [], invoices: [], vendors: [], profile: {} });
     }
 
     if (products) clientData.products = products;
     if (invoices) clientData.invoices = invoices;
+    if (vendors) clientData.vendors = vendors;
     if (profile) {
       clientData.profile = profile;
       await User.updateOne({ username }, { $set: { shopName: profile.shopName, shopType: profile.shopType } });
@@ -163,9 +165,9 @@ app.get('/api/sync/pull', async (req, res) => {
 
     const data = await ClientData.findOne({ username });
     if (!data) {
-      return res.json({ products: [], invoices: [], profile: { shopName: "My Shop", shopType: "general", address: "", phone: "" } });
+      return res.json({ products: [], invoices: [], vendors: [], profile: { shopName: "My Shop", shopType: "general", address: "", phone: "" } });
     }
-    res.json({ products: data.products, invoices: data.invoices, profile: data.profile });
+    res.json({ products: data.products, invoices: data.invoices, vendors: data.vendors, profile: data.profile });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
