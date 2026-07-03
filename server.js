@@ -25,7 +25,8 @@ const UserSchema = new mongoose.Schema({
   passwordHash: { type: String, required: true },
   shopName: String,
   shopType: String,
-  active: { type: Boolean, default: true }
+  active: { type: Boolean, default: true },
+  assigned_device_id: { type: String, default: null }
 });
 
 const ClientDataSchema = new mongoose.Schema({
@@ -91,8 +92,9 @@ app.post('/api/auth/signup', async (req, res) => {
 // 2. Login Route
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, deviceId } = req.body;
     if (!username || !password) return res.status(400).json({ error: "Missing username or password" });
+    if (!deviceId) return res.status(400).json({ error: "Device ID is required for login" });
 
     const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
     if (!user || user.passwordHash !== hashPassword(password)) {
@@ -100,6 +102,14 @@ app.post('/api/auth/login', async (req, res) => {
     }
     if (user.active === false) {
       return res.status(403).json({ error: "Your license is inactive. Please contact the administrator to activate it." });
+    }
+
+    // Hardware locking logic
+    if (!user.assigned_device_id) {
+      user.assigned_device_id = deviceId;
+      await user.save();
+    } else if (user.assigned_device_id !== deviceId) {
+      return res.status(403).json({ error: "This account is already registered on another device." });
     }
 
     const data = await ClientData.findOne({ username: user.username }) || {};
@@ -306,6 +316,21 @@ app.post('/api/crm/users/:username/toggle-active', async (req, res) => {
     user.active = user.active !== false ? false : true;
     await user.save();
     res.json({ message: `Client is now ${user.active ? 'active' : 'inactive'}`, active: user.active });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7b. Reset Device ID
+app.post('/api/crm/users/:username/reset-device', async (req, res) => {
+  try {
+    const username = req.params.username;
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    user.assigned_device_id = null;
+    await user.save();
+    res.json({ message: "Device assignment reset successfully" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
